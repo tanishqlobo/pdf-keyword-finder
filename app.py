@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 # -----------------------------
 # 🔑 OCR SPACE API KEY
 # -----------------------------
-OCR_API_KEY = "YOUR_OCR_KEY_HERE"
+OCR_API_KEY = "K88121712188957"
 
 
 # -----------------------------
@@ -200,6 +200,7 @@ if uploaded_files and gir_number and keywords:
         components.html(html_code, height=80)
 
         st.markdown("---")
+
 
 
 
