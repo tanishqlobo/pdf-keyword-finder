@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 # 🔑 OCR.Space API KEY
 # Replace with your key (inside quotes)
 # -------------------------
-OCR_API_KEY = "YOUR_OCR_KEY_HERE"
+OCR_API_KEY = "K88121712188957"
 
 
 # -------------------------
@@ -160,6 +160,7 @@ if uploaded_files and gir_number and keyword:
         components.html(html_code, height=80)
 
         st.success("Matched pages ready! Scroll up to review them before printing.")
+
 
 
 
