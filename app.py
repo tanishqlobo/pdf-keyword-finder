@@ -1,65 +1,89 @@
 import streamlit as st
-import requests
 import fitz  # PyMuPDF
-from io import BytesIO
 from PyPDF2 import PdfWriter, PdfReader
+from io import BytesIO
 import base64
 import streamlit.components.v1 as components
+import requests
 
 
 # -----------------------------
-# 🔑 OCR SPACE API KEY
+# OCR SPACE API KEY (FALLBACK)
 # -----------------------------
 OCR_API_KEY = "K88121712188957"
 
 
 # -----------------------------
-# STREAMLIT PAGE CONFIG
+# STREAMLIT CONFIG
 # -----------------------------
-st.set_page_config(page_title="Customs Page Extractor", layout="wide")
-st.title("📄 Customs BOE Page Extractor with Print Preview + Highlighting")
-st.write("Upload PDFs → Enter GIR → Enter up to 10 Item Numbers → Get highlighted pages per item.")
+st.set_page_config(page_title="Invoice Extractor", layout="wide")
+st.title("📄 Invoice Page Extractor (Hybrid: Direct + OCR Fallback)")
+st.write("Enter GIR → Item Number → Country → Upload PDFs → Get highlighted pages.")
 
 
 # -----------------------------
 # USER INPUTS
 # -----------------------------
-gir_number = st.text_input("Enter GIR Number (e.g., 5399)")
+gir_number = st.text_input("Enter GIR Number")
 
-st.subheader("Enter Item Numbers (optional)")
-keyword_inputs = []
-for i in range(1, 11):
-    keyword_inputs.append(
-        st.text_input(f"Enter Item Number {i} from BOE")
-    )
-
-# Keep only non-empty keywords
-keywords = [k.strip() for k in keyword_inputs if k.strip()]
+item_number = st.text_input("Enter Item Number (required)")
+country_origin = st.text_input("Enter Country of Origin (required)")
 
 uploaded_files = st.file_uploader(
-    "Upload PDF files",
+    "Upload Invoice PDFs",
     type="pdf",
     accept_multiple_files=True
 )
 
 
+# Helper: OCR fallback
+def ocr_fallback(image_bytes):
+    files = {"file": ("page.png", image_bytes)}
+    data = {
+        "apikey": OCR_API_KEY,
+        "language": "eng",
+        "OCREngine": 1,
+        "scale": True,
+        "detectOrientation": True
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.ocr.space/parse/image",
+            files=files,
+            data=data
+        ).json()
+
+        if resp.get("IsErroredOnProcessing"):
+            return ""
+
+        return resp["ParsedResults"][0]["ParsedText"].lower()
+
+    except:
+        return ""
+
+
 # -----------------------------
 # MAIN PROCESSING
 # -----------------------------
-if uploaded_files and gir_number and keywords:
+if uploaded_files and gir_number and item_number and country_origin:
 
-    st.info("Processing files… This may take some time depending on the number of pages.")
+    st.info("Processing… Using direct text extraction with OCR fallback only when needed.")
 
-    results = {kw: [] for kw in keywords}  # store matches for each keyword
+    matched_pages = []
 
+    item_lower = item_number.lower()
+    country_lower = country_origin.lower()
+
+    # Iterate through uploaded PDFs
     for uploaded in uploaded_files:
         file_name = uploaded.name
 
-        # Ignore BOE PDFs
+        # Skip BOE files
         if "BOE" in file_name.upper():
             continue
 
-        # Process only PDFs with GIR in filename
+        # Must contain GIR number
         if gir_number not in file_name:
             continue
 
@@ -69,115 +93,99 @@ if uploaded_files and gir_number and keywords:
         for page_num in range(len(pdf_doc)):
             page = pdf_doc[page_num]
 
-            # Render page at 300 DPI
-            pix = page.get_pixmap(dpi=300)
-            img_bytes = BytesIO(pix.tobytes("png"))
+            # -------------------------------------------
+            # 1) Direct Text Extraction (FASTEST)
+            # -------------------------------------------
+            text = page.get_text().lower().strip()
 
-            # OCR SPACE REQUEST
-            files = {"file": ("page.png", img_bytes.getvalue())}
-            data = {
-                "apikey": OCR_API_KEY,
-                "language": "eng",
-                "OCREngine": 1,
-                "scale": True,
-                "detectOrientation": True
-            }
+            # If extraction empty → Use OCR fallback
+            if len(text) < 10:
+                # Render page at 300 DPI for OCR
+                pix = page.get_pixmap(dpi=300)
+                img_bytes = pix.tobytes("png")
 
-            try:
-                response = requests.post(
-                    "https://api.ocr.space/parse/image",
-                    files=files,
-                    data=data
-                )
-                result = response.json()
-            except Exception as e:
-                st.error(f"Error sending OCR request: {e}")
-                continue
+                text = ocr_fallback(img_bytes)
 
-            # Parse OCR text
-            if result.get("IsErroredOnProcessing"):
-                parsed_text = ""
-            else:
-                parsed_text = result["ParsedResults"][0]["ParsedText"].lower()
+            # -------------------------------------------
+            # Must contain BOTH item number + country
+            # -------------------------------------------
+            if item_lower in text and country_lower in text:
 
-            # Debug expander
-            with st.expander(f"OCR Text for {file_name} — Page {page_num+1}"):
-                st.text(parsed_text)
+                # highlight page in PyMuPDF
+                highlight_page = pdf_doc.load_page(page_num)
 
-            # Check each keyword
-            for kw in keywords:
-                if kw.lower() in parsed_text:
+                # highlight item number
+                for rect in highlight_page.search_for(item_number, hit_max=500):
+                    highlight_page.add_highlight_annot(rect)
 
-                    # -----------------------------
-                    # HIGHLIGHT KEYWORD ON PDF PAGE
-                    # -----------------------------
-                    highlight_page = fitz.open(stream=pdf_bytes, filetype="pdf")[page_num]
-                    rects = highlight_page.search_for(kw)
+                # highlight country
+                for rect in highlight_page.search_for(country_origin, hit_max=500):
+                    highlight_page.add_highlight_annot(rect)
 
-                    for rect in rects:
-                        highlight_page.add_highlight_annot(rect)
+                # Save modified page as a single-page PDF
+                temp_pdf = BytesIO(pdf_doc.write())
+                temp_reader = PdfReader(temp_pdf)
 
-                    # Save modified page to memory
-                    writer = PdfWriter()
-                    single_page_pdf = BytesIO()
-                    writer.add_page(PdfReader(BytesIO(highlight_page.parent.write())).pages[0])
-                    writer.write(single_page_pdf)
+                single_writer = PdfWriter()
+                single_page_pdf = BytesIO()
+                single_writer.add_page(temp_reader.pages[page_num])
+                single_writer.write(single_page_pdf)
 
-                    results[kw].append({
-                        "pdf_name": file_name,
-                        "page_num": page_num + 1,
-                        "image": pix.tobytes("png"),
-                        "pdf_bytes": single_page_pdf.getvalue()
-                    })
+                matched_pages.append({
+                    "pdf_name": file_name,
+                    "page_num": page_num + 1,
+                    "pdf_bytes": single_page_pdf.getvalue(),
+                    "image": page.get_pixmap(dpi=150).tobytes("png")
+                })
 
 
     # -----------------------------
-    # OUTPUT FOR EACH KEYWORD
+    # RESULTS
     # -----------------------------
-    st.subheader("Matched Results Per Keyword")
+    st.header("Matched Pages")
 
-    for kw in keywords:
-        st.markdown(f"## 🔍 Results for Item: **{kw}**")
+    if not matched_pages:
+        st.error("❌ No pages found containing BOTH the Item Number AND the Country of Origin.")
+    else:
+        final_writer = PdfWriter()
 
-        pages = results[kw]
-        if not pages:
-            st.warning(f"No pages found for keyword: {kw}")
-            continue
-
-        # Merge pages for this keyword
-        writer = PdfWriter()
-        for item in pages:
+        for item in matched_pages:
             reader = PdfReader(BytesIO(item["pdf_bytes"]))
-            writer.add_page(reader.pages[0])
+            final_writer.add_page(reader.pages[0])
 
         final_pdf = BytesIO()
-        writer.write(final_pdf)
+        final_writer.write(final_pdf)
 
-        # Preview thumbnails
-        for item in pages:
+        # Show extracted pages
+        for item in matched_pages:
             st.write(f"📄 {item['pdf_name']} — Page {item['page_num']}")
             st.image(item["image"], width=450)
+
+        st.markdown("---")
+
+        file_out = f"CustomsPrint-{item_number}-{country_origin}-{gir_number}.pdf"
 
         # -----------------------------
         # DOWNLOAD BUTTON
         # -----------------------------
         st.download_button(
-            label=f"📥 Download: CustomsPrint-{kw}-{gir_number}.pdf",
+            label=f"📥 Download {file_out}",
             data=final_pdf.getvalue(),
-            file_name=f"CustomsPrint-{kw}-{gir_number}.pdf",
+            file_name=file_out,
             mime="application/pdf"
         )
 
         # -----------------------------
-        # PRINT PREVIEW BUTTON (Chrome)
+        # PRINT PREVIEW BUTTON
         # -----------------------------
         base64_pdf = base64.b64encode(final_pdf.getvalue()).decode("utf-8")
+
         html_code = f"""
-            <iframe id="pdfFrame_{kw}"
+            <iframe id="pdfFrame"
                 src="data:application/pdf;base64,{base64_pdf}"
                 style="display:none;"></iframe>
 
-            <button onclick="printPDF_{kw}()"
+            <button onclick="printPDF()"
                 style="
                     padding:12px 22px;
                     background-color:#4CAF50;
@@ -185,21 +193,24 @@ if uploaded_files and gir_number and keywords:
                     border:none;
                     border-radius:6px;
                     cursor:pointer;
-                    font-size:16px;">
-                🖨️ Print Preview for {kw}
+                    font-size:16px;
+                    border-radius:6px;">
+                🖨️ Print Preview
             </button>
 
             <script>
-                function printPDF_{kw}() {{
-                    var frame = document.getElementById('pdfFrame_{kw}');
+                function printPDF() {{
+                    var frame = document.getElementById('pdfFrame');
                     frame.contentWindow.focus();
                     frame.contentWindow.print();
                 }}
             </script>
         """
+
         components.html(html_code, height=80)
 
-        st.markdown("---")
+
+
 
 
 
