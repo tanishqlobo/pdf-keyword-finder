@@ -7,23 +7,30 @@ import streamlit.components.v1 as components
 import requests
 
 
-# -----------------------------
-# OCR SPACE API KEY (FALLBACK)
-# -----------------------------
-OCR_API_KEY = "K88121712188957"
+# ----------------------------------------------
+# 🔑 OCR SPACE API KEY (FALLBACK)
+# ----------------------------------------------
+OCR_API_KEY = "K88121712188957"   # <-- REPLACE THIS
 
 
-# -----------------------------
+# ----------------------------------------------
 # STREAMLIT CONFIG
-# -----------------------------
+# ----------------------------------------------
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Page Extractor (Hybrid: Direct + OCR Fallback)")
-st.write("Enter GIR → Item Number → Country → Upload PDFs → Get highlighted pages.")
+st.title("📄 Invoice Page Extractor (Hybrid: Direct Text + OCR Fallback)")
+st.write(
+    "• Filters PDFs by GIR number\n"
+    "• Ignores BOE PDFs\n"
+    "• Extracts pages ONLY if BOTH Item Number AND Country of Origin exist\n"
+    "• Highlights both terms\n"
+    "• Merges results into one PDF\n"
+    "• Enables Download + Print Preview"
+)
 
 
-# -----------------------------
+# ----------------------------------------------
 # USER INPUTS
-# -----------------------------
+# ----------------------------------------------
 gir_number = st.text_input("Enter GIR Number")
 
 item_number = st.text_input("Enter Item Number (required)")
@@ -36,7 +43,9 @@ uploaded_files = st.file_uploader(
 )
 
 
-# Helper: OCR fallback
+# ----------------------------------------------
+# OCR FALLBACK FUNCTION
+# ----------------------------------------------
 def ocr_fallback(image_bytes):
     files = {"file": ("page.png", image_bytes)}
     data = {
@@ -63,19 +72,19 @@ def ocr_fallback(image_bytes):
         return ""
 
 
-# -----------------------------
+# ----------------------------------------------
 # MAIN PROCESSING
-# -----------------------------
+# ----------------------------------------------
 if uploaded_files and gir_number and item_number and country_origin:
 
-    st.info("Processing… Using direct text extraction with OCR fallback only when needed.")
+    st.info("Processing invoices… Fast text extraction with OCR fallback if needed.")
 
     matched_pages = []
 
     item_lower = item_number.lower()
     country_lower = country_origin.lower()
 
-    # Iterate through uploaded PDFs
+    # Loop through PDFs
     for uploaded in uploaded_files:
         file_name = uploaded.name
 
@@ -83,46 +92,47 @@ if uploaded_files and gir_number and item_number and country_origin:
         if "BOE" in file_name.upper():
             continue
 
-        # Must contain GIR number
+        # Only process PDFs containing GIR in filename
         if gir_number not in file_name:
             continue
 
         pdf_bytes = uploaded.read()
         pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
+        # Process each page
         for page_num in range(len(pdf_doc)):
             page = pdf_doc[page_num]
 
-            # -------------------------------------------
-            # 1) Direct Text Extraction (FASTEST)
-            # -------------------------------------------
+            # ------------------------------------------
+            # 1) Direct text extraction (super fast)
+            # ------------------------------------------
             text = page.get_text().lower().strip()
 
-            # If extraction empty → Use OCR fallback
+            # If empty, fallback to OCR
             if len(text) < 10:
-                # Render page at 300 DPI for OCR
                 pix = page.get_pixmap(dpi=300)
                 img_bytes = pix.tobytes("png")
-
                 text = ocr_fallback(img_bytes)
 
-            # -------------------------------------------
-            # Must contain BOTH item number + country
-            # -------------------------------------------
+            # ------------------------------------------
+            # Must contain BOTH keywords
+            # ------------------------------------------
             if item_lower in text and country_lower in text:
 
-                # highlight page in PyMuPDF
+                # Modify the page for highlighting
                 highlight_page = pdf_doc.load_page(page_num)
 
-                # highlight item number
-                for rect in highlight_page.search_for(item_number, hit_max=500):
+                # Highlight Item Number
+                item_rects = highlight_page.search_for(item_number)
+                for rect in item_rects:
                     highlight_page.add_highlight_annot(rect)
 
-                # highlight country
-                for rect in highlight_page.search_for(country_origin, hit_max=500):
+                # Highlight Country of Origin
+                country_rects = highlight_page.search_for(country_origin)
+                for rect in country_rects:
                     highlight_page.add_highlight_annot(rect)
 
-                # Save modified page as a single-page PDF
+                # Save highlighted single page PDF
                 temp_pdf = BytesIO(pdf_doc.write())
                 temp_reader = PdfReader(temp_pdf)
 
@@ -139,9 +149,9 @@ if uploaded_files and gir_number and item_number and country_origin:
                 })
 
 
-    # -----------------------------
+    # ----------------------------------------------
     # RESULTS
-    # -----------------------------
+    # ----------------------------------------------
     st.header("Matched Pages")
 
     if not matched_pages:
@@ -149,6 +159,7 @@ if uploaded_files and gir_number and item_number and country_origin:
     else:
         final_writer = PdfWriter()
 
+        # Merge all matched pages
         for item in matched_pages:
             reader = PdfReader(BytesIO(item["pdf_bytes"]))
             final_writer.add_page(reader.pages[0])
@@ -156,7 +167,7 @@ if uploaded_files and gir_number and item_number and country_origin:
         final_pdf = BytesIO()
         final_writer.write(final_pdf)
 
-        # Show extracted pages
+        # Show results
         for item in matched_pages:
             st.write(f"📄 {item['pdf_name']} — Page {item['page_num']}")
             st.image(item["image"], width=450)
@@ -165,9 +176,9 @@ if uploaded_files and gir_number and item_number and country_origin:
 
         file_out = f"CustomsPrint-{item_number}-{country_origin}-{gir_number}.pdf"
 
-        # -----------------------------
+        # ----------------------------------------------
         # DOWNLOAD BUTTON
-        # -----------------------------
+        # ----------------------------------------------
         st.download_button(
             label=f"📥 Download {file_out}",
             data=final_pdf.getvalue(),
@@ -175,9 +186,9 @@ if uploaded_files and gir_number and item_number and country_origin:
             mime="application/pdf"
         )
 
-        # -----------------------------
-        # PRINT PREVIEW BUTTON
-        # -----------------------------
+        # ----------------------------------------------
+        # PRINT PREVIEW BUTTON (Chrome-compatible)
+        # ----------------------------------------------
         base64_pdf = base64.b64encode(final_pdf.getvalue()).decode("utf-8")
 
         html_code = f"""
@@ -193,8 +204,7 @@ if uploaded_files and gir_number and item_number and country_origin:
                     border:none;
                     border-radius:6px;
                     cursor:pointer;
-                    font-size:16px;
-                    border-radius:6px;">
+                    font-size:16px;">
                 🖨️ Print Preview
             </button>
 
@@ -208,6 +218,8 @@ if uploaded_files and gir_number and item_number and country_origin:
         """
 
         components.html(html_code, height=80)
+
+
 
 
 
