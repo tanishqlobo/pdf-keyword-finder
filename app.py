@@ -5,7 +5,7 @@ from io import BytesIO
 from PyPDF2 import PdfWriter, PdfReader
 
 # 🔑 Replace this with your OCR.Space API key
-OCR_API_KEY = K88121712188957
+OCR_API_KEY = "K88121712188957"
 
 st.set_page_config(page_title="PDF Keyword Finder", layout="wide")
 
@@ -120,5 +120,6 @@ if uploaded_files and gir_number and keyword:
             file_name="matched_pages.pdf",
             mime="application/pdf"
         )
+
 
 
