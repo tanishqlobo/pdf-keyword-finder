@@ -5,6 +5,7 @@ from io import BytesIO
 import base64
 import streamlit.components.v1 as components
 import requests
+import math
 
 
 # ----------------------------------------------
@@ -17,14 +18,15 @@ OCR_API_KEY = "K88121712188957"   # <-- REPLACE THIS
 # STREAMLIT CONFIG
 # ----------------------------------------------
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Page Extractor (Hybrid: Direct Text + OCR Fallback)")
+st.title("📄 Invoice Page Extractor (Hybrid + Proximity Matching)")
 st.write(
     "• Filters PDFs by GIR number\n"
     "• Ignores BOE PDFs\n"
     "• Extracts pages ONLY if BOTH Item Number AND Country of Origin exist\n"
+    "• AND are within 1 cm (28.35 points) on the PDF page\n"
     "• Highlights both terms\n"
     "• Merges results into one PDF\n"
-    "• Enables Download + Print Preview"
+    "• Download + Print Preview"
 )
 
 
@@ -73,66 +75,104 @@ def ocr_fallback(image_bytes):
 
 
 # ----------------------------------------------
+# DISTANCE FUNCTION (RECTANGLE TO RECTANGLE)
+# ----------------------------------------------
+def rect_distance(r1, r2):
+    """Returns minimum distance between two rectangles in PDF points."""
+    
+    # Horizontal distance
+    if r1.x2 < r2.x1:
+        dx = r2.x1 - r1.x2
+    elif r2.x2 < r1.x1:
+        dx = r1.x1 - r2.x2
+    else:
+        dx = 0  # overlap
+
+    # Vertical distance
+    if r1.y2 < r2.y1:
+        dy = r2.y1 - r1.y2
+    elif r2.y2 < r1.y1:
+        dy = r1.y1 - r2.y2
+    else:
+        dy = 0  # overlap
+
+    return math.sqrt(dx*dx + dy*dy)
+
+
+# ----------------------------------------------
 # MAIN PROCESSING
 # ----------------------------------------------
 if uploaded_files and gir_number and item_number and country_origin:
 
-    st.info("Processing invoices… Fast text extraction with OCR fallback if needed.")
+    st.info("Processing… Using text extraction, OCR fallback, and spatial matching.")
 
     matched_pages = []
 
     item_lower = item_number.lower()
     country_lower = country_origin.lower()
 
-    # Loop through PDFs
+    ONE_CM = 28.3465
+
+
     for uploaded in uploaded_files:
         file_name = uploaded.name
 
-        # Skip BOE files
         if "BOE" in file_name.upper():
             continue
 
-        # Only process PDFs containing GIR in filename
         if gir_number not in file_name:
             continue
 
         pdf_bytes = uploaded.read()
         pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # Process each page
         for page_num in range(len(pdf_doc)):
             page = pdf_doc[page_num]
 
-            # ------------------------------------------
-            # 1) Direct text extraction (super fast)
-            # ------------------------------------------
+            # 1) Direct text extraction
             text = page.get_text().lower().strip()
 
-            # If empty, fallback to OCR
+            # OCR fallback if no text
             if len(text) < 10:
                 pix = page.get_pixmap(dpi=300)
                 img_bytes = pix.tobytes("png")
                 text = ocr_fallback(img_bytes)
 
-            # ------------------------------------------
-            # Must contain BOTH keywords
-            # ------------------------------------------
+            # Must contain both words
             if item_lower in text and country_lower in text:
 
-                # Modify the page for highlighting
+                # Find rectangles in the page
+                item_rects = page.search_for(item_number)
+                country_rects = page.search_for(country_origin)
+
+                if not item_rects or not country_rects:
+                    continue
+
+                # CHECK PROXIMITY — NEED <= 1 CM
+                close_enough = False
+
+                for r1 in item_rects:
+                    for r2 in country_rects:
+                        if rect_distance(r1, r2) <= ONE_CM:
+                            close_enough = True
+                            break
+                    if close_enough:
+                        break
+
+                if not close_enough:
+                    continue  # Skip pages where distance is larger than 1 cm
+
+                # PAGE QUALIFIES — now highlight & extract
+
                 highlight_page = pdf_doc.load_page(page_num)
 
-                # Highlight Item Number
-                item_rects = highlight_page.search_for(item_number)
                 for rect in item_rects:
                     highlight_page.add_highlight_annot(rect)
 
-                # Highlight Country of Origin
-                country_rects = highlight_page.search_for(country_origin)
                 for rect in country_rects:
                     highlight_page.add_highlight_annot(rect)
 
-                # Save highlighted single page PDF
+                # Save modified single page
                 temp_pdf = BytesIO(pdf_doc.write())
                 temp_reader = PdfReader(temp_pdf)
 
@@ -152,14 +192,13 @@ if uploaded_files and gir_number and item_number and country_origin:
     # ----------------------------------------------
     # RESULTS
     # ----------------------------------------------
-    st.header("Matched Pages")
+    st.header("Matched Pages (Item + Country + 1 cm proximity)")
 
     if not matched_pages:
-        st.error("❌ No pages found containing BOTH the Item Number AND the Country of Origin.")
+        st.error("❌ No pages met ALL 3 conditions:\n• Item Number\n• Country of Origin\n• ≤ 1 cm apart")
     else:
         final_writer = PdfWriter()
-
-        # Merge all matched pages
+        
         for item in matched_pages:
             reader = PdfReader(BytesIO(item["pdf_bytes"]))
             final_writer.add_page(reader.pages[0])
@@ -167,7 +206,6 @@ if uploaded_files and gir_number and item_number and country_origin:
         final_pdf = BytesIO()
         final_writer.write(final_pdf)
 
-        # Show results
         for item in matched_pages:
             st.write(f"📄 {item['pdf_name']} — Page {item['page_num']}")
             st.image(item["image"], width=450)
@@ -176,9 +214,6 @@ if uploaded_files and gir_number and item_number and country_origin:
 
         file_out = f"CustomsPrint-{item_number}-{country_origin}-{gir_number}.pdf"
 
-        # ----------------------------------------------
-        # DOWNLOAD BUTTON
-        # ----------------------------------------------
         st.download_button(
             label=f"📥 Download {file_out}",
             data=final_pdf.getvalue(),
@@ -186,9 +221,7 @@ if uploaded_files and gir_number and item_number and country_origin:
             mime="application/pdf"
         )
 
-        # ----------------------------------------------
-        # PRINT PREVIEW BUTTON (Chrome-compatible)
-        # ----------------------------------------------
+        # Print Preview
         base64_pdf = base64.b64encode(final_pdf.getvalue()).decode("utf-8")
 
         html_code = f"""
@@ -218,6 +251,8 @@ if uploaded_files and gir_number and item_number and country_origin:
         """
 
         components.html(html_code, height=80)
+
+
 
 
 
