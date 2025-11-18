@@ -2,26 +2,39 @@ import streamlit as st
 import requests
 import fitz  # PyMuPDF
 from io import BytesIO
-from PyPDF2 import PdfReader, PdfWriter
+from PyPDF2 import PdfWriter, PdfReader
 import base64
 import streamlit.components.v1 as components
 
 
-# -------------------------
-# 🔑 OCR.Space API KEY
-# Replace with your key (inside quotes)
-# -------------------------
-OCR_API_KEY = "K88121712188957"
+# -----------------------------
+# 🔑 OCR SPACE API KEY
+# -----------------------------
+OCR_API_KEY = "YOUR_OCR_KEY_HERE"
 
 
-# -------------------------
-# Streamlit UI
-# -------------------------
-st.set_page_config(page_title="PDF Page Finder", layout="wide")
+# -----------------------------
+# STREAMLIT PAGE CONFIG
+# -----------------------------
+st.set_page_config(page_title="Customs Page Extractor", layout="wide")
+st.title("📄 Customs BOE Page Extractor with Print Preview + Highlighting")
+st.write("Upload PDFs → Enter GIR → Enter up to 10 Item Numbers → Get highlighted pages per item.")
 
-st.title("🔎 PDF Page Extractor with Print Preview")
-st.write("Upload PDFs → Enter GIR → Enter Keyword → Get Relevant Pages → Print.")
 
+# -----------------------------
+# USER INPUTS
+# -----------------------------
+gir_number = st.text_input("Enter GIR Number (e.g., 5399)")
+
+st.subheader("Enter Item Numbers (optional)")
+keyword_inputs = []
+for i in range(1, 11):
+    keyword_inputs.append(
+        st.text_input(f"Enter Item Number {i} from BOE")
+    )
+
+# Keep only non-empty keywords
+keywords = [k.strip() for k in keyword_inputs if k.strip()]
 
 uploaded_files = st.file_uploader(
     "Upload PDF files",
@@ -29,49 +42,47 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-gir_number = st.text_input("Enter GIR Number (e.g., 5433)")
-keyword = st.text_input("Enter keyword to search for (English or Arabic)")
 
+# -----------------------------
+# MAIN PROCESSING
+# -----------------------------
+if uploaded_files and gir_number and keywords:
 
-# -------------------------
-# MAIN LOGIC
-# -------------------------
-if uploaded_files and gir_number and keyword:
+    st.info("Processing files… This may take some time depending on the number of pages.")
 
-    st.info("Processing PDFs… please wait. OCR may take a few seconds per page.")
-
-    matched_pages = []
+    results = {kw: [] for kw in keywords}  # store matches for each keyword
 
     for uploaded in uploaded_files:
         file_name = uploaded.name
 
-        # Filter PDFs by GIR number in the filename
+        # Ignore BOE PDFs
+        if "BOE" in file_name.upper():
+            continue
+
+        # Process only PDFs with GIR in filename
         if gir_number not in file_name:
             continue
 
         pdf_bytes = uploaded.read()
         pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # Process pages
         for page_num in range(len(pdf_doc)):
-
             page = pdf_doc[page_num]
 
-            # Render page at higher DPI for better OCR accuracy
+            # Render page at 300 DPI
             pix = page.get_pixmap(dpi=300)
             img_bytes = BytesIO(pix.tobytes("png"))
 
-            # OCR.Space request
+            # OCR SPACE REQUEST
             files = {"file": ("page.png", img_bytes.getvalue())}
             data = {
                 "apikey": OCR_API_KEY,
                 "language": "eng",
                 "OCREngine": 1,
-                "detectOrientation": True,
-                "scale": True
+                "scale": True,
+                "detectOrientation": True
             }
 
-            # Send to OCR API
             try:
                 response = requests.post(
                     "https://api.ocr.space/parse/image",
@@ -80,63 +91,93 @@ if uploaded_files and gir_number and keyword:
                 )
                 result = response.json()
             except Exception as e:
-                st.error(f"OCR request failed on {file_name}, Page {page_num+1}: {e}")
+                st.error(f"Error sending OCR request: {e}")
                 continue
 
-            # Handle OCR errors
+            # Parse OCR text
             if result.get("IsErroredOnProcessing"):
-                err = result.get("ErrorMessage", "Unknown OCR error")
-                st.warning(f"OCR error on {file_name}, Page {page_num+1}: {err}")
                 parsed_text = ""
             else:
-                parsed_text = result["ParsedResults"][0]["ParsedText"].lower().strip()
+                parsed_text = result["ParsedResults"][0]["ParsedText"].lower()
 
-            # Debug text viewer
+            # Debug expander
             with st.expander(f"OCR Text for {file_name} — Page {page_num+1}"):
                 st.text(parsed_text)
 
-            # Keyword match
-            if keyword.lower() in parsed_text.replace("\n", " "):
-                matched_pages.append({
-                    "pdf_name": file_name,
-                    "page_num": page_num + 1,
-                    "image": pix.tobytes("png"),
-                    "pdf_bytes": pdf_bytes
-                })
+            # Check each keyword
+            for kw in keywords:
+                if kw.lower() in parsed_text:
+
+                    # -----------------------------
+                    # HIGHLIGHT KEYWORD ON PDF PAGE
+                    # -----------------------------
+                    highlight_page = fitz.open(stream=pdf_bytes, filetype="pdf")[page_num]
+                    rects = highlight_page.search_for(kw)
+
+                    for rect in rects:
+                        highlight_page.add_highlight_annot(rect)
+
+                    # Save modified page to memory
+                    writer = PdfWriter()
+                    single_page_pdf = BytesIO()
+                    writer.add_page(PdfReader(BytesIO(highlight_page.parent.write())).pages[0])
+                    writer.write(single_page_pdf)
+
+                    results[kw].append({
+                        "pdf_name": file_name,
+                        "page_num": page_num + 1,
+                        "image": pix.tobytes("png"),
+                        "pdf_bytes": single_page_pdf.getvalue()
+                    })
 
 
-    # -------------------------
-    # RESULTS DISPLAY
-    # -------------------------
-    st.subheader("Matched Pages")
+    # -----------------------------
+    # OUTPUT FOR EACH KEYWORD
+    # -----------------------------
+    st.subheader("Matched Results Per Keyword")
 
-    if not matched_pages:
-        st.error("❌ No matching pages found. Check OCR output above.")
-    else:
+    for kw in keywords:
+        st.markdown(f"## 🔍 Results for Item: **{kw}**")
+
+        pages = results[kw]
+        if not pages:
+            st.warning(f"No pages found for keyword: {kw}")
+            continue
+
+        # Merge pages for this keyword
         writer = PdfWriter()
+        for item in pages:
+            reader = PdfReader(BytesIO(item["pdf_bytes"]))
+            writer.add_page(reader.pages[0])
 
-        for item in matched_pages:
-            st.write(f"### 📄 {item['pdf_name']} — Page {item['page_num']}")
+        final_pdf = BytesIO()
+        writer.write(final_pdf)
+
+        # Preview thumbnails
+        for item in pages:
+            st.write(f"📄 {item['pdf_name']} — Page {item['page_num']}")
             st.image(item["image"], width=450)
 
-            reader = PdfReader(BytesIO(item["pdf_bytes"]))
-            writer.add_page(reader.pages[item["page_num"] - 1])
+        # -----------------------------
+        # DOWNLOAD BUTTON
+        # -----------------------------
+        st.download_button(
+            label=f"📥 Download: CustomsPrint-{kw}-{gir_number}.pdf",
+            data=final_pdf.getvalue(),
+            file_name=f"CustomsPrint-{kw}-{gir_number}.pdf",
+            mime="application/pdf"
+        )
 
-        out_pdf = BytesIO()
-        writer.write(out_pdf)
-        writer.close()
-
-        # -------------------------
-        # PRINT PREVIEW BUTTON
-        # -------------------------
-        base64_pdf = base64.b64encode(out_pdf.getvalue()).decode("utf-8")
-
+        # -----------------------------
+        # PRINT PREVIEW BUTTON (Chrome)
+        # -----------------------------
+        base64_pdf = base64.b64encode(final_pdf.getvalue()).decode("utf-8")
         html_code = f"""
-            <iframe id="pdfFrame"
+            <iframe id="pdfFrame_{kw}"
                 src="data:application/pdf;base64,{base64_pdf}"
-                style="width:0; height:0; border:none;"></iframe>
+                style="display:none;"></iframe>
 
-            <button onclick="printPDF()"
+            <button onclick="printPDF_{kw}()"
                 style="
                     padding:12px 22px;
                     background-color:#4CAF50;
@@ -145,21 +186,22 @@ if uploaded_files and gir_number and keyword:
                     border-radius:6px;
                     cursor:pointer;
                     font-size:16px;">
-                🖨️ Print Preview
+                🖨️ Print Preview for {kw}
             </button>
 
             <script>
-                function printPDF() {{
-                    var frame = document.getElementById('pdfFrame');
+                function printPDF_{kw}() {{
+                    var frame = document.getElementById('pdfFrame_{kw}');
                     frame.contentWindow.focus();
                     frame.contentWindow.print();
                 }}
             </script>
         """
-
         components.html(html_code, height=80)
 
-        st.success("Matched pages ready! Scroll up to review them before printing.")
+        st.markdown("---")
+
+
 
 
 
