@@ -11,21 +11,21 @@ import math
 # ----------------------------------------------
 # 🔑 OCR SPACE API KEY (FALLBACK)
 # ----------------------------------------------
-OCR_API_KEY = "K88121712188957"   # <-- REPLACE THIS
+OCR_API_KEY = "K88121712188957"   # <-- REPLACE THIS IF NEEDED
 
 
 # ----------------------------------------------
 # STREAMLIT CONFIG
 # ----------------------------------------------
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Page Extractor (Hybrid + 1cm Proximity Matching)")
+st.title("📄 Invoice Page Extractor (HS + CO + Item + 6cm Rule)")
 st.write(
-    "• Filters PDFs by GIR number\n"
-    "• Ignores BOE PDFs\n"
-    "• Extracts pages ONLY if BOTH Item Number AND Country of Origin exist\n"
-    "• AND are within 1 cm (28.35 pts) distance on the same page\n"
-    "• Highlights both terms\n"
-    "• Merges results into one PDF\n"
+    "• Filters PDFs by GIR number in the **filename**\n"
+    "• Ignores PDFs whose name contains 'BOE'\n"
+    "• On each page, requires **HS Code**, **Country of Origin**, and **Item Number**\n"
+    "• Item Number must be within **6 cm** of the HS Code on that page\n"
+    "• Highlights HS Code, Country, and Item Number\n"
+    "• Merges all matching pages into one PDF\n"
     "• Download + Print Preview"
 )
 
@@ -33,8 +33,9 @@ st.write(
 # ----------------------------------------------
 # USER INPUTS
 # ----------------------------------------------
-gir_number = st.text_input("Enter GIR Number")
+gir_number = st.text_input("Enter GIR Number (required)")
 
+hs_code = st.text_input("Enter HS Code (required)")
 item_number = st.text_input("Enter Item Number (required)")
 country_origin = st.text_input("Enter Country of Origin (required)")
 
@@ -75,11 +76,10 @@ def ocr_fallback(image_bytes):
 
 
 # ----------------------------------------------
-# RECTANGLE DISTANCE (CORRECT PyMuPDF ATTRS)
+# RECTANGLE DISTANCE (PyMuPDF rects)
 # ----------------------------------------------
 def rect_distance(r1, r2):
     """Returns minimum distance between two rectangles in PDF points."""
-
     # Horizontal gap
     if r1.x1 < r2.x0:
         dx = r2.x0 - r1.x1
@@ -96,23 +96,27 @@ def rect_distance(r1, r2):
     else:
         dy = 0  # overlapping vertically
 
-    return math.sqrt(dx*dx + dy*dy)
+    return math.sqrt(dx * dx + dy * dy)
 
 
 # ----------------------------------------------
 # MAIN PROCESSING
 # ----------------------------------------------
-if uploaded_files and gir_number and item_number and country_origin:
+if uploaded_files and gir_number and hs_code and item_number and country_origin:
 
-    st.info("Processing… Using direct text extraction, OCR fallback, and 1 cm proximity filtering.")
+    st.info(
+        "Processing… Using direct text extraction, OCR fallback, and a 6 cm "
+        "proximity rule between HS Code and Item Number."
+    )
 
     matched_pages = []
 
+    hs_lower = hs_code.lower()
     item_lower = item_number.lower()
     country_lower = country_origin.lower()
 
-    ONE_CM = 28.3465  # 1 cm in PDF points
-
+    ONE_CM = 28.3465            # 1 cm in PDF points
+    SIX_CM = ONE_CM * 6         # 6 cm in PDF points
 
     for uploaded in uploaded_files:
         file_name = uploaded.name
@@ -121,7 +125,7 @@ if uploaded_files and gir_number and item_number and country_origin:
         if "BOE" in file_name.upper():
             continue
 
-        # Only process PDFs containing GIR number
+        # Only process PDFs containing GIR number in the filename
         if gir_number not in file_name:
             continue
 
@@ -141,37 +145,42 @@ if uploaded_files and gir_number and item_number and country_origin:
                 img_bytes = pix.tobytes("png")
                 text = ocr_fallback(img_bytes)
 
-            # Must contain both keywords
-            if item_lower in text and country_lower in text:
+            # Must contain HS + Country + Item somewhere in text
+            if hs_lower in text and country_lower in text and item_lower in text:
 
-                # Obtain rectangles
-                item_rects = page.search_for(item_number)
+                # Obtain rectangles for HS, Country, and Item
+                hs_rects = page.search_for(hs_code)
                 country_rects = page.search_for(country_origin)
+                item_rects = page.search_for(item_number)
 
-                if not item_rects or not country_rects:
+                if not hs_rects or not country_rects or not item_rects:
                     continue
 
-                # Check spatial proximity
+                # Check spatial proximity between HS Code and Item Number
                 close_enough = False
 
-                for r1 in item_rects:
-                    for r2 in country_rects:
-                        if rect_distance(r1, r2) <= ONE_CM:
+                for hs_rect in hs_rects:
+                    for item_rect in item_rects:
+                        if rect_distance(hs_rect, item_rect) <= SIX_CM:
                             close_enough = True
                             break
                     if close_enough:
                         break
 
                 if not close_enough:
-                    continue  # They are too far apart → skip page
+                    # HS and Item exist but too far apart → not the same line/entry
+                    continue
 
-                # PAGE MATCHES — highlight it
+                # PAGE MATCHES — highlight HS, Country, and Item
                 highlight_page = pdf_doc.load_page(page_num)
 
-                for rect in item_rects:
+                for rect in hs_rects:
                     highlight_page.add_highlight_annot(rect)
 
                 for rect in country_rects:
+                    highlight_page.add_highlight_annot(rect)
+
+                for rect in item_rects:
                     highlight_page.add_highlight_annot(rect)
 
                 # Save modified single page
@@ -183,21 +192,30 @@ if uploaded_files and gir_number and item_number and country_origin:
                 single_writer.add_page(temp_reader.pages[page_num])
                 single_writer.write(single_page_pdf)
 
+                # Low-res image preview
+                preview_img = page.get_pixmap(dpi=150).tobytes("png")
+
                 matched_pages.append({
                     "pdf_name": file_name,
                     "page_num": page_num + 1,
                     "pdf_bytes": single_page_pdf.getvalue(),
-                    "image": page.get_pixmap(dpi=150).tobytes("png")
+                    "image": preview_img
                 })
 
 
     # ----------------------------------------------
     # RESULTS
     # ----------------------------------------------
-    st.header("Matched Pages (Item + Country + ≤ 1 cm apart)")
+    st.header("Matched Pages (HS + Country + Item + ≤ 6 cm HS–Item)")
 
     if not matched_pages:
-        st.error("❌ No pages met ALL conditions:\n• Item Number\n• Country of Origin\n• Within 1 cm proximity")
+        st.error(
+            "❌ No pages met ALL conditions:\n"
+            "• HS Code present\n"
+            "• Country of Origin present\n"
+            "• Item Number present\n"
+            "• Item Number within 6 cm of HS Code"
+        )
     else:
         final_writer = PdfWriter()
 
@@ -215,8 +233,8 @@ if uploaded_files and gir_number and item_number and country_origin:
 
         st.markdown("---")
 
-        # File name
-        file_out = f"CustomsPrint-{item_number}-{country_origin}-{gir_number}.pdf"
+        # Output file name
+        file_out = f"CustomsPrint-{hs_code}-{country_origin}-{item_number}-{gir_number}.pdf"
 
         # Download button
         st.download_button(
@@ -226,7 +244,7 @@ if uploaded_files and gir_number and item_number and country_origin:
             mime="application/pdf"
         )
 
-        # Print Preview
+        # Print Preview (opens browser print dialog on the merged PDF)
         base64_pdf = base64.b64encode(final_pdf.getvalue()).decode("utf-8")
 
         html_code = f"""
@@ -256,6 +274,8 @@ if uploaded_files and gir_number and item_number and country_origin:
         """
 
         components.html(html_code, height=80)
+
+
 
 
 
