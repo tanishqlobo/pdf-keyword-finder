@@ -1,8 +1,7 @@
 import os
-import math
 import base64
-from io import BytesIO
 import traceback
+from io import BytesIO
 
 import gradio as gr
 import fitz  # PyMuPDF
@@ -46,56 +45,24 @@ def ocr_fallback(image_bytes: bytes) -> str:
 
 
 # -----------------------------
-# RECTANGLE DISTANCE
+# MAIN LOGIC (GIR + Item only)
 # -----------------------------
-def rect_distance(r1, r2) -> float:
-    # Horizontal gap
-    if r1.x1 < r2.x0:
-        dx = r2.x0 - r1.x1
-    elif r2.x1 < r1.x0:
-        dx = r1.x0 - r2.x1
-    else:
-        dx = 0
-
-    # Vertical gap
-    if r1.y1 < r2.y0:
-        dy = r2.y0 - r1.y1
-    elif r2.y1 < r1.y0:
-        dy = r1.y0 - r2.y1
-    else:
-        dy = 0
-
-    return math.sqrt(dx * dx + dy * dy)
-
-
-# -----------------------------
-# MAIN LOGIC
-# -----------------------------
-def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
+def process_pdfs(files, gir_number, item_number):
     try:
-        # Normalize inputs
         gir_number = (gir_number or "").strip()
-        hs_code = (hs_code or "").strip()
-        country_origin = (country_origin or "").strip()
         item_number = (item_number or "").strip()
 
         if not files:
             return "No files uploaded.", None, ""
 
-        if not gir_number or not hs_code or not country_origin or not item_number:
-            return "Please fill GIR, HS Code, Country of Origin, and Item Number.", None, ""
+        if not gir_number or not item_number:
+            return "Please fill GIR Number and Item Number.", None, ""
 
         # Gradio File(type="filepath") → files is str or list[str]
         if isinstance(files, str):
             files = [files]
 
-        hs_lower = hs_code.lower()
-        co_lower = country_origin.lower()
         item_lower = item_number.lower()
-
-        ONE_CM = 28.3465          # 1 cm in PDF points
-        SIX_CM = ONE_CM * 6       # 6 cm in PDF points
-
         matched_pages = []
 
         for path in files:
@@ -127,34 +94,16 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
                     img_bytes = pix.tobytes("png")
                     text = ocr_fallback(img_bytes)
 
-                # Require HS + CO + Item in text
-                if hs_lower in text and co_lower in text and item_lower in text:
-                    hs_rects = page.search_for(hs_code)
-                    co_rects = page.search_for(country_origin)
+                # Require Item Number in text
+                if item_lower in text:
+                    # Find rectangles for Item Number
                     item_rects = page.search_for(item_number)
 
-                    if not hs_rects or not co_rects or not item_rects:
+                    if not item_rects:
                         continue
 
-                    # Item must be within 6 cm of HS Code
-                    close_enough = False
-                    for hs_rect in hs_rects:
-                        for item_rect in item_rects:
-                            if rect_distance(hs_rect, item_rect) <= SIX_CM:
-                                close_enough = True
-                                break
-                        if close_enough:
-                            break
-
-                    if not close_enough:
-                        continue
-
-                    # Highlight HS, CO, and Item
+                    # Highlight Item Number
                     highlight_page = pdf_doc.load_page(page_num)
-                    for r in hs_rects:
-                        highlight_page.add_highlight_annot(r)
-                    for r in co_rects:
-                        highlight_page.add_highlight_annot(r)
                     for r in item_rects:
                         highlight_page.add_highlight_annot(r)
 
@@ -175,11 +124,7 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
 
         if not matched_pages:
             return (
-                "❌ No pages met ALL conditions:\n"
-                "• HS Code present\n"
-                "• Country of Origin present\n"
-                "• Item Number present\n"
-                "• Item Number within 6 cm of HS Code",
+                "❌ No pages contained the Item Number for this GIR.",
                 None,
                 "",
             )
@@ -193,7 +138,7 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
         final_pdf_bytes = BytesIO()
         final_writer.write(final_pdf_bytes)
 
-        out_name = f"CustomsPrint-{hs_code}-{country_origin}-{item_number}-{gir_number}.pdf"
+        out_name = f"CustomsPrint-{item_number}-{gir_number}.pdf"
 
         # Save to /tmp so Gradio can serve it
         os.makedirs("/tmp/customs_out", exist_ok=True)
@@ -208,6 +153,7 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
             <iframe id="pdfFrame"
                 src="data:application/pdf;base64,{b64_pdf}"
                 style="width:0;height:0;border:none;display:none;"></iframe>
+
             <button onclick="printPDF()"
                 style="
                     padding:10px 18px;
@@ -219,6 +165,7 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
                     font-size:15px;">
                 🖨️ Print Preview
             </button>
+
             <script>
                 function printPDF() {{
                     var frame = document.getElementById('pdfFrame');
@@ -242,29 +189,25 @@ def process_pdfs(files, gir_number, hs_code, country_origin, item_number):
 # -----------------------------
 # GRADIO UI
 # -----------------------------
-with gr.Blocks(title="Customs Invoice Extractor (HS + CO + Item + 6cm Rule)") as demo:
+with gr.Blocks(title="Customs Invoice Extractor (GIR + Item Only)") as demo:
     gr.Markdown(
         """
-    # 📄 Customs Invoice Extractor  
+    # 📄 Customs Invoice Extractor (GIR + Item Number)
+
     **Logic:**  
     1. Filter PDFs by **GIR number in the filename**  
     2. Ignore any PDF whose name contains **"BOE"**  
-    3. On each page, require **HS Code**, **Country of Origin**, and **Item Number**  
-    4. Require **Item Number** to be within **6 cm** of the **HS Code**  
-    5. Highlight HS, Country, and Item on matched pages  
-    6. Merge all matching pages into one PDF for download/printing  
+    3. On each page, require **Item Number** in the text  
+    4. Highlight Item Number on matched pages  
+    5. Merge all matching pages into one PDF for download/printing  
     """
     )
 
     with gr.Row():
-        gir_number = gr.Textbox(label="GIR Number", placeholder="e.g., 5399")
-        hs_code = gr.Textbox(label="HS Code", placeholder="e.g., 853690100000")
+        gir_number_in = gr.Textbox(label="GIR Number", placeholder="e.g., 5399")
+        item_number_in = gr.Textbox(label="Item Number", placeholder="e.g., 12345678")
 
-    with gr.Row():
-        country_origin = gr.Textbox(label="Country of Origin", placeholder="e.g., GERMANY")
-        item_number = gr.Textbox(label="Item Number", placeholder="e.g., 12345678")
-
-    files = gr.File(
+    files_in = gr.File(
         label="Upload Invoice PDFs",
         file_count="multiple",
         type="filepath",      # Render: returns list[str] of paths
@@ -279,7 +222,7 @@ with gr.Blocks(title="Customs Invoice Extractor (HS + CO + Item + 6cm Rule)") as
 
     submit.click(
         process_pdfs,
-        inputs=[files, gir_number, hs_code, country_origin, item_number],
+        inputs=[files_in, gir_number_in, item_number_in],
         outputs=[status_box, result_file, preview_html],
     )
 
@@ -288,6 +231,8 @@ if __name__ == "__main__":
     # Render sets PORT env var; Gradio listens on that
     port = int(os.environ.get("PORT", 7860))
     demo.launch(server_name="0.0.0.0", server_port=port)
+
+
 
 
 
