@@ -104,14 +104,11 @@ def process_pdfs(files, gir_number, *item_numbers):
                     img_bytes = pix.tobytes("png")
                     text = ocr_fallback(img_bytes)
 
-                # --------------------------------------------------------
-                # CHECK MATCH WITH ANY ITEM NUMBER
-                # --------------------------------------------------------
                 matched_this_page = False
                 matched_rects = []
 
-                for item in item_numbers:
-                    if item.lower() in text:
+                for item in item_numbers_lower:
+                    if item in text:
                         rects = page.search_for(item)
                         if rects:
                             matched_this_page = True
@@ -120,9 +117,7 @@ def process_pdfs(files, gir_number, *item_numbers):
                 if not matched_this_page:
                     continue
 
-                # --------------------------------------------------------
-                # HIGHLIGHT ALL MATCHES
-                # --------------------------------------------------------
+                # Highlight matched items
                 highlight_page = pdf_doc.load_page(page_num)
                 for rect in matched_rects:
                     highlight_page.add_highlight_annot(rect)
@@ -217,26 +212,23 @@ def process_pdfs(files, gir_number, *item_numbers):
 # --------------------------------------------------------
 # GRADIO UI
 # --------------------------------------------------------
-with gr.Blocks(title="Customs Invoice Extractor (Multiple Item Numbers)") as demo:
+with gr.Blocks(title="Customs Invoice Extractor (15 Item Numbers)") as demo:
     gr.Markdown(
         """
-    # 📄 Customs Invoice Extractor (GIR + Multiple Item Numbers)
+    # 📄 Customs Invoice Extractor (GIR + Up to 15 Item Numbers)
 
-    **Logic:**
-    1. Upload all invoice PDFs  
-    2. Enter GIR Number  
-    3. Enter multiple Item Numbers  
-    4. App finds **all pages** containing any Item Number  
-    5. Ignores PDFs with “BOE” in the filename  
-    6. Highlights the Item Number(s)  
-    7. Merges all matched pages into one PDF  
+    - Upload all invoice PDFs  
+    - Enter GIR Number  
+    - Enter **up to 15 item numbers**  
+    - Finds all invoice pages containing ANY item  
+    - Highlights matches  
+    - Merges into one PDF  
     """
     )
 
-    with gr.Row():
-        gir_number_in = gr.Textbox(label="GIR Number", placeholder="e.g., 5399")
+    gir_number_in = gr.Textbox(label="GIR Number", placeholder="e.g., 5399")
 
-    gr.Markdown("### Enter up to 10 Item Numbers (leave empty if not used)")
+    gr.Markdown("### Enter up to 15 Item Numbers")
 
     with gr.Column():
         item_1 = gr.Textbox(label="Item 1")
@@ -249,6 +241,11 @@ with gr.Blocks(title="Customs Invoice Extractor (Multiple Item Numbers)") as dem
         item_8 = gr.Textbox(label="Item 8")
         item_9 = gr.Textbox(label="Item 9")
         item_10 = gr.Textbox(label="Item 10")
+        item_11 = gr.Textbox(label="Item 11")
+        item_12 = gr.Textbox(label="Item 12")
+        item_13 = gr.Textbox(label="Item 13")
+        item_14 = gr.Textbox(label="Item 14")
+        item_15 = gr.Textbox(label="Item 15")
 
     files_in = gr.File(
         label="Upload Invoice PDFs",
@@ -265,9 +262,13 @@ with gr.Blocks(title="Customs Invoice Extractor (Multiple Item Numbers)") as dem
 
     submit.click(
         process_pdfs,
-        inputs=[files_in, gir_number_in,
-                item_1, item_2, item_3, item_4, item_5,
-                item_6, item_7, item_8, item_9, item_10],
+        inputs=[
+            files_in,
+            gir_number_in,
+            item_1, item_2, item_3, item_4, item_5,
+            item_6, item_7, item_8, item_9, item_10,
+            item_11, item_12, item_13, item_14, item_15
+        ],
         outputs=[status_box, result_file, preview_html],
     )
 
@@ -275,6 +276,8 @@ with gr.Blocks(title="Customs Invoice Extractor (Multiple Item Numbers)") as dem
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
     demo.launch(server_name="0.0.0.0", server_port=port)
+
+
 
 
 
